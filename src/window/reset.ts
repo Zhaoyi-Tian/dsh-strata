@@ -1,0 +1,54 @@
+/** Opening a new window: replace the active conversation without a summary. */
+import type { Context } from '@deepseek-ai/cordis'
+import { createUserMessage, HarnessError, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { toolPairingBalancedBefore, toolPairingBalancedAfter } from '@deepseek-ai/dsh-compaction'
+import type { Session } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-projection'
+import type {} from '@deepseek-ai/dsh-token-meter'
+import { windowBlock } from './prompts.js'
+import { windowState } from './windows.js'
+import type { ResolvedConfig } from '../config.js'
+import { recentNotes } from '../notes/notes.js'
+
+/** Guidance plus the `<context_window>` block for the newest of `ids`. */
+export function openMessage(config: ResolvedConfig, ids: readonly string[], hints: readonly string[], notice?: string): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: [config.prompts.guidance, windowBlock(ids, hints, notice)].filter(Boolean).join('\n') }],
+    source: { kind: 'context-window', windowId: ids.at(-1)!, event: 'open', form: 'instructions' },
+  })
+}
+
+/** Replace everything after the system head, leaving an empty window unchanged. */
+export function resetWindow(ctx: Context, session: Session, config: ResolvedConfig,
+  reason: 'requested' | 'limit', signal: AbortSignal): void {
+  signal.throwIfAborted()
+  const state = windowState(ctx, session)
+  if (state.conversationItems === 0) return
+  const body = session.surface.nodes.filter(seq => seq !== state.systemHeadSeq)
+  const start = body[0]
+  const end = body.at(-1)
+  // A system rewrite can shadow every conversation node without opening a window.
+  if (start === undefined || end === undefined) return
+  if (!toolPairingBalancedBefore(session, start) || !toolPairingBalancedAfter(session, end)) {
+    throw new HarnessError('context-window: cannot replace a span with unanswered tool calls', 'CONTEXT_WINDOW_PAIRING')
+  }
+  const windowId = `w${state.windows.length}`
+  const previous = state.windows.at(-1)!.id
+  // A forced switch can land before the model saved a checkpoint for this window.
+  const notice = reason === 'limit'
+    ? `Previous context window ${previous} ended at the hard limit; its last checkpoint may be stale. Items #${start}–#${end} are in that window.`
+    : undefined
+  const message = openMessage(config, [...state.windows.map(window => window.id), windowId], recentNotes(ctx, session), notice)
+  const shadowedTokenCount = ctx.tokenMeter.measure(session).nodes
+    .filter(node => node.seq !== state.systemHeadSeq)
+    .reduce((sum, node) => sum + node.heuristicTokens, 0)
+  const prune = session.append('compaction/prune', {
+    shadowedRange: { start, end },
+    shadowedSeqs: body,
+    shadowedTokenCount,
+  })
+  session.append('user/message', message, {
+    surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+    sourceEventSeqs: [prune.seq, ...body],
+  })
+}

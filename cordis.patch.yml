@@ -1,0 +1,16 @@
+- id: compaction-basic
+  disabled: true
+- id: command-compact
+  disabled: true
+- id: tool-result-pruner
+  disabled: true
+- id: spill-policy
+  disabled: true
+- id: spill-local
+  disabled: true
+- id: image-offload
+  disabled: true
+
+- insert:
+    - id: dsh-strata
+      name: dsh-strata
